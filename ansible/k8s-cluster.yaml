@@ -1,0 +1,358 @@
+---
+- name: checkhost
+  hosts: tag_Cluster_k8_kubeadm
+  become: yes
+  tasks:
+    - name: add swappoff
+      command: swapoff -a
+
+    - name: Gather IP addresses from each master node
+      set_fact:
+        hosts_entries_master: "{{ hosts_entries_master | default('') }}{{ hostvars[item].ansible_default_ipv4.address }}\n"
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['tag_Node_master'] }}"
+      run_once: true
+
+    - name: Debug master host IP addresses
+      debug:
+        msg: "{{ hosts_entries_master.splitlines() }}"
+
+    - name: Gather IP addresses from each worker node
+      set_fact:
+        hosts_entries_worker: "{{ hosts_entries_worker | default('') }}{{ hostvars[item].ansible_default_ipv4.address }}\n"
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['tag_Node_worker'] }}"
+      run_once: true
+
+    - name: Debug master host IP addresses worker
+      debug:
+        msg: "{{ hosts_entries_worker.splitlines() }}"
+
+    - name: Add IP addresses to /etc/hosts with master
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ item }} master{{ index }}"
+        create: yes
+        state: present
+        regexp: "^{{ item }} master{{ index }}"
+      loop: "{{ hosts_entries_master.splitlines() }}"
+      loop_control:
+        index_var: index
+
+    - name: Add IP addresses to /etc/hosts with index
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ item }} worker{{ index }}"
+        create: yes
+        state: present
+        regexp: "^{{ item }} worker{{ index }}"
+      loop: "{{ hosts_entries_worker.splitlines() }}"
+      loop_control:
+        index_var: index
+
+    - name: Set hostname on each worker node
+      command: hostnamectl set-hostname worker{{ index + 1 }}
+      loop: "{{ groups['tag_Node_worker'] }}"
+      loop_control:
+        index_var: index
+      delegate_to: "{{ item }}"
+
+    - name: Set hostname on each master node
+      command: hostnamectl set-hostname master{{ index + 1 }}
+      loop: "{{ groups['tag_Node_master'] }}"
+      loop_control:
+        index_var: index
+      delegate_to: "{{ item }}"
+
+    - name: reset reset connection
+      meta: reset_connection
+
+    - name: Pause for 30 seconds
+      pause:
+        seconds: 30
+
+- name: create kubeadm cluster master process
+  hosts: tag_Cluster_k8_kubeadm
+  become: yes
+  tasks:
+    - name: add k8s configurations
+      template:
+        src: templates/k8s/k8s.conf
+        dest: /etc/modules-load.d/k8s.conf
+
+    - name: execute overlay
+      command: sudo modprobe overlay
+
+    - name: execute br_netfilter
+      command: sudo modprobe br_netfilter
+
+    - name: sysctl params required by setup, params persist across reboots
+      template:
+        src: templates/k8s/system.conf
+        dest: /etc/sysctl.d/k8s.conf
+
+    - name: Apply sysctl params without reboot
+      command: sudo sysctl --system
+
+    - name: update packages
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: install containerd
+      apt:
+        name: containerd
+        state: present
+        update_cache: yes
+
+    - name: create containerd etc file
+      file:
+        path: /etc/containerd
+        state: directory
+        mode: "0744"
+
+    - name: execute containerd command
+      command: containerd config default
+      register: containerd_config_output
+
+    - name: store the containerd output
+      copy:
+        dest: /etc/containerd/config.toml
+        content: "{{ containerd_config_output.stdout }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Ensure SystemdCgroup is set to true in containerd config with leading whitespace
+      lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: "^            SystemdCgroup = false"
+        line: "            SystemdCgroup = true"
+
+    - name: Restart containerd
+      systemd_service:
+        name: containerd
+        state: restarted
+        enabled: true
+
+    - name: update packages
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: apt-transport-https may be a dummy package; if so, you can skip that package
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - gpg
+          - curl
+        state: present
+
+    - name: public signing key for the Kubernetes package repositories
+      apt_key:
+        url: https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key
+        keyring: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add the appropriate Kubernetes apt repository
+      apt_repository:
+        repo: deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /
+        state: present
+        filename: kubernetes
+
+    - name: update packages
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: install kubelet kubeadm kubectl
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Hold kubelet kubeadm kubectl
+      command: apt-mark hold kubelet kubeadm kubectl
+
+- name: initialize kubeadm cluster master process
+  hosts: tag_Name_master_node_main
+  become: yes
+  tasks:
+    - name: initialize the cluster
+      command: kubeadm init --control-plane-endpoint k8s-lb-test-dedaccd072a37cd4.elb.us-east-1.amazonaws.com:6443 --upload-certs
+      register: kubeadm_init_output
+
+    - debug:
+        var: kubeadm_init_output
+
+    - name: Save kubeadm join command
+      copy:
+        content: "{{ kubeadm_init_output.stdout }}"
+        dest: /root/kubeadm-init-output.txt
+
+    - name: check kubelet status
+      command: service kubelet status
+      register: service_kubelet
+
+    - debug:
+        var: service_kubelet
+
+    - name: check kubelet system status
+      command: systemctl status kubelet
+      register: system_kubelet
+
+    - debug:
+        var: system_kubelet
+
+    - name: check kubelet logs
+      command: journalctl -u kubelet
+      register: extend_logs_kubelet
+
+    - debug:
+        var: extend_logs_kubelet
+
+- name: create kubeadm user
+  hosts: tag_Name_master_node_main
+  tasks:
+    - name: create .kube directory
+      file:
+        path: "/home/ubuntu/.kube"
+        state: directory
+        mode: "0755"
+
+    - name: copy admin config file to .kube folder
+      become: yes
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/ubuntu/.kube/config"
+        owner: "{{ lookup('pipe','id -u') }}"
+        group: "{{ lookup('pipe','id -g') }}"
+        remote_src: yes
+
+- name: create cilium cni
+  hosts: tag_Name_master_node_main
+  become: yes
+  tasks:
+    - name: Fetch Cilium CLI version
+      uri:
+        url: https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt
+        method: GET
+        return_content: yes
+      register: cilium_version_response
+
+    - name: Set CILIUM_CLI_VERSION fact
+      set_fact:
+        CILIUM_CLI_VERSION: "{{ cilium_version_response.content.strip() }}"
+
+    - name: Debug CILIUM_CLI_VERSION
+      debug:
+        msg: "CILIUM_CLI_VERSION is set to {{ CILIUM_CLI_VERSION }}"
+
+    - name: Set CLI_ARCH based on system architecture
+      set_fact:
+        CLI_ARCH: "{{ 'arm64' if lookup('pipe', 'uname -m') == 'aarch64' else 'amd64' }}"
+
+    - name: Debug CLI_ARCH
+      debug:
+        msg: "CLI_ARCH is set to {{ CLI_ARCH }}"
+
+    - name: Download Cilium CLI tarball
+      get_url:
+        url: "https://github.com/cilium/cilium-cli/releases/download/{{ CILIUM_CLI_VERSION }}/cilium-linux-{{ CLI_ARCH }}.tar.gz"
+        dest: "/root/cilium-linux-{{ CLI_ARCH }}.tar.gz"
+        mode: "0644"
+
+    - name: Download Cilium CLI checksum
+      get_url:
+        url: "https://github.com/cilium/cilium-cli/releases/download/{{ CILIUM_CLI_VERSION }}/cilium-linux-{{ CLI_ARCH }}.tar.gz.sha256sum"
+        dest: "/root/cilium-linux-{{ CLI_ARCH }}.tar.gz.sha256sum"
+        mode: "0644"
+
+    - name: Verify checksum of Cilium CLI tarball
+      command:
+        chdir: /root/
+        cmd: sha256sum --check cilium-linux-{{ CLI_ARCH }}.tar.gz.sha256sum
+      register: checksum_result
+
+    - name: Display checksum result
+      debug:
+        msg: "{{ checksum_result.stdout }}"
+
+    - name: unarchive file
+      unarchive:
+        src: "/root/cilium-linux-{{ CLI_ARCH }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: yes
+
+    - name: Remove Cilium CLI tarball and checksum file
+      file:
+        path: "/root/cilium-linux-{{ CLI_ARCH }}.tar.gz"
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove Cilium CLI checksum file
+      file:
+        path: "/root/cilium-linux-{{ CLI_ARCH }}.tar.gz.sha256sum"
+        state: absent
+      ignore_errors: yes
+
+- name: install cilium
+  hosts: tag_Name_master_node_main
+  tasks:
+    - name: install cilium
+      command: cilium install
+
+    - name: cilium status
+      command: cilium status
+      register: cilium_status
+
+    - debug:
+        var: cilium_status
+
+    - name: Sleep for 300 seconds
+      wait_for:
+        timeout: 300
+
+    - name: check pod status
+      command: kubectl get pods -n kube-system
+      register: pod_status
+
+    - debug:
+        msg: "{{pod_status.stdout_lines}}"
+
+    - name: print join command
+      command: kubeadm token create --print-join-command
+      register: token_out
+
+    - name: Debug TOKEN
+      debug:
+        msg: "{{token_out.stdout}}"
+
+    - name: Set worker node join token
+      set_fact:
+        TOKEN: "{{ token_out.stdout }}"
+
+  #  - name: Make TOKEN available to all hosts
+  #   add_host:
+  #    groups: "tag_Cluster_k8_kubeadm"
+  #     TOKEN: "{{ TOKEN }}"
+
+- name: add/join worker nodes to the cluster
+  hosts: tag_Node_worker
+  become: yes
+  tasks:
+    - name: Retrieve JOIN_COMMAND from master
+      set_fact:
+        JOIN_COMMAND: "{{ hostvars[groups['tag_Name_master_node'][0]].TOKEN }}"
+
+    - name: join worker nodes with master
+      command: "{{ JOIN_COMMAND }}"
+
+    # - name: cilium status connectivity
+    #   command: cilium connectivity test
+    #   register: cilium_connect
+
+    # - debug:
+    #     var: cilium_connect
