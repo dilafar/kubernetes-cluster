@@ -5,6 +5,7 @@ resource "aws_subnet" "dev-subnet" {
 
   tags = {
     Name = "${var.env_prefix}-subnet"
+    "kubernetes.io/cluster/kubernetes" = "owned"
   }
 
 }
@@ -14,6 +15,7 @@ resource "aws_internet_gateway" "dev-gateway" {
   vpc_id = var.vpc_id
   tags = {
     Name = "${var.env_prefix}-igw"
+    "kubernetes.io/cluster/kubernetes" = "owned"
   }
 }
 
@@ -27,5 +29,6 @@ resource "aws_default_route_table" "dev-route" {
 
   tags = {
     Name = "${var.env_prefix}-main-route_table"
+    "kubernetes.io/cluster/kubernetes" = "owned"
   }
 }

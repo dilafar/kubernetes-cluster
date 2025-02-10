@@ -1,75 +1,88 @@
 ---
+- name: Get AWS Load Balancer DNS
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Execute AWS CLI command to get Elastic Beanstalk environment DNS
+      command: >
+        aws elbv2 describe-load-balancers --names dev-k8-master-nlb --query 'LoadBalancers[0].DNSName' --output text
+      register: eb_dns_output
+
+    - ansible.builtin.debug:
+                msg: "{{ eb_dns_output.stdout }}"
+    - name: loadbalancer url
+      set_fact:
+        NLB: "{{ eb_dns_output.stdout }}"
+
 - name: checkhost
+  hosts: tag_Cluster_k8_kubeadm
+  become: yes
+  tasks:
+    - name: Fetch IMDSv2 token
+      shell: >
+        curl -sX PUT "http://169.254.169.254/latest/api/token"
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
+      register: imds_token
+
+    - name: Get EC2 private DNS
+      shell: >
+        curl -s -H "X-aws-ec2-metadata-token: {{ imds_token.stdout }}"
+        http://169.254.169.254/latest/meta-data/local-hostname
+      register: private_dns
+
+    - name: Set hostname
+      command: hostnamectl set-hostname {{ private_dns.stdout }}
+
+    - name: Join worker nodes with master
+      command: hostname
+      register: host
+
+    - name: Debug TOKEN
+      debug:
+        msg: "{{host.stdout}}"
+
+- name: adm_host
   hosts: tag_Cluster_k8_kubeadm
   become: yes
   tasks:
     - name: add swappoff
       command: swapoff -a
-
+      
     - name: Gather IP addresses from each master node
       set_fact:
-        hosts_entries_master: "{{ hosts_entries_master | default('') }}{{ hostvars[item].ansible_default_ipv4.address }}\n"
+        hosts_entries_master: "{{ ansible_default_ipv4.address }}"
+
+    - name: Debug master host IP addresses
+      debug:
+        msg: "{{ hosts_entries_master }}"
+
+    - name: Gather hostnames from each  node
+      set_fact:
+        hosts_entries: "{{ ansible_fqdn }}"
+
+    - name: Debug master host IP addresses
+      debug:
+        msg: "{{ hosts_entries }}"
+
+    - name: Gather all
+      set_fact:
+        entries: "{{ entries | default('') }}{{ hostvars[item].ansible_default_ipv4.address ~ ' ' ~ hostvars[item].ansible_fqdn }}\n"
       delegate_to: "{{ item }}"
-      loop: "{{ groups['tag_Node_master'] }}"
+      loop: "{{ groups['tag_Cluster_k8_kubeadm'] }}"
       run_once: true
 
     - name: Debug master host IP addresses
       debug:
-        msg: "{{ hosts_entries_master.splitlines() }}"
-
-    - name: Gather IP addresses from each worker node
-      set_fact:
-        hosts_entries_worker: "{{ hosts_entries_worker | default('') }}{{ hostvars[item].ansible_default_ipv4.address }}\n"
-      delegate_to: "{{ item }}"
-      loop: "{{ groups['tag_Node_worker'] }}"
-      run_once: true
-
-    - name: Debug master host IP addresses worker
-      debug:
-        msg: "{{ hosts_entries_worker.splitlines() }}"
+        msg: "{{ entries.splitlines() }}"
 
     - name: Add IP addresses to /etc/hosts with master
       lineinfile:
         path: /etc/hosts
-        line: "{{ item }} master{{ index }}"
+        line: "{{ item }}"
         create: yes
         state: present
-        regexp: "^{{ item }} master{{ index }}"
-      loop: "{{ hosts_entries_master.splitlines() }}"
-      loop_control:
-        index_var: index
-
-    - name: Add IP addresses to /etc/hosts with index
-      lineinfile:
-        path: /etc/hosts
-        line: "{{ item }} worker{{ index }}"
-        create: yes
-        state: present
-        regexp: "^{{ item }} worker{{ index }}"
-      loop: "{{ hosts_entries_worker.splitlines() }}"
-      loop_control:
-        index_var: index
-
-    - name: Set hostname on each worker node
-      command: hostnamectl set-hostname worker{{ index + 1 }}
-      loop: "{{ groups['tag_Node_worker'] }}"
-      loop_control:
-        index_var: index
-      delegate_to: "{{ item }}"
-
-    - name: Set hostname on each master node
-      command: hostnamectl set-hostname master{{ index + 1 }}
-      loop: "{{ groups['tag_Node_master'] }}"
-      loop_control:
-        index_var: index
-      delegate_to: "{{ item }}"
-
-    - name: reset reset connection
-      meta: reset_connection
-
-    - name: Pause for 30 seconds
-      pause:
-        seconds: 30
+        regexp: "^{{ item }}"
+      loop: "{{ entries.splitlines() }}"
 
 - name: create kubeadm cluster master process
   hosts: tag_Cluster_k8_kubeadm
@@ -171,19 +184,139 @@
           - kubelet
           - kubeadm
           - kubectl
+          - nfs-common
+          - open-iscsi
         state: present
 
     - name: Hold kubelet kubeadm kubectl
       command: apt-mark hold kubelet kubeadm kubectl
 
+    - name: Ensure iscsid is started and enabled
+      service:
+        name: iscsid
+        state: started
+        enabled: yes
+    - name: Update package lists
+      apt:
+        update_cache: yes
+
+    - name: Install jq
+      apt:
+        name: jq
+        state: present
+
+    - name: Get local IP of primary network interface
+      command: ip --json addr show eth0
+      register: ip_output
+      changed_when: false
+      
+    - name: Extract local IP from JSON output
+      set_fact:
+          local_ip: "{{ (ip_output.stdout | from_json)[0]['addr_info'] | selectattr('family', 'equalto', 'inet') | map(attribute='local') | first }}"
+      
+    - name: Configure kubelet with local IP
+      copy:
+        dest: /etc/default/kubelet
+        content: |
+            KUBELET_EXTRA_ARGS=--node-ip={{ local_ip }}
+        owner: root
+        group: root
+        mode: '0644'
+
+- name: add/join worker nodes to the cluster
+  hosts: tag_Name_master_node
+  become: yes
+  tasks:
+
+    - name: Gather hostnames from each  node
+      set_fact:
+        hosts_entries: "{{ ansible_fqdn }}"
+
+    - name: Debug master host IP addresses
+      debug:
+        msg: "{{ hosts_entries }}"
+
+    - name: Fetch IMDSv2 token
+      shell: >
+        curl -sX PUT "http://169.254.169.254/latest/api/token"
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
+      register: imds_token
+
+    - name: Get EC2 private DNS
+      shell: >
+        curl -s -H "X-aws-ec2-metadata-token: {{ imds_token.stdout }}"
+        http://169.254.169.254/latest/meta-data/public-ipv4
+      register: public_ip
+
+
+    - debug:
+         msg: "Public IP is {{ public_ip.stdout }}"
+
+    - name: Extract values from JOIN_COMMAND
+      set_fact:
+        PUBLIC_IP: "{{ public_ip.stdout }}"
+        NODE: "{{ ansible_fqdn }}"
+        API_SERVER_ENDPOINT: "{{ hostvars['localhost']['NLB'] }}"
+
+    - name: Create join configuration file for the worker node
+      template:
+        src: templates/kubeadm/kubeadm-master-1.yaml.j2
+        dest: "/tmp/kubeadm-config.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+
+- name: add/join worker nodes to the cluster
+  hosts: tag_Name_master_node_2
+  become: yes
+  tasks:
+
+    - name: Gather hostnames from each  node
+      set_fact:
+        hosts_entries: "{{ ansible_fqdn }}"
+
+    - name: Debug master host IP addresses
+      debug:
+        msg: "{{ hosts_entries }}"
+
+    - name: Fetch IMDSv2 token
+      shell: >
+        curl -sX PUT "http://169.254.169.254/latest/api/token"
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
+      register: imds_token
+
+    - name: Get EC2 private DNS
+      shell: >
+        curl -s -H "X-aws-ec2-metadata-token: {{ imds_token.stdout }}"
+        http://169.254.169.254/latest/meta-data/public-ipv4
+      register: public_ip
+
+
+    - debug:
+         msg: "Public IP is {{ public_ip.stdout }}"
+    
+    - name: Extract values from JOIN_COMMAND
+      set_fact:
+        PUBLIC_IP: "{{ public_ip.stdout }}"
+        NODE: "{{ ansible_fqdn }}"
+        API_SERVER_ENDPOINT: "{{ hostvars['localhost']['NLB'] }}"
+
+    - name: Create join configuration file for the worker node
+      template:
+        src: templates/kubeadm/kubeadm-master-2.yaml.j2
+        dest: "/tmp/kubeadm-config.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+
 - name: initialize kubeadm cluster master process
-  hosts: tag_Name_master_node_main
+  hosts: tag_Name_master_node
   become: yes
   tasks:
     - name: initialize the cluster
-      command: kubeadm init --control-plane-endpoint k8s-lb-test-dedaccd072a37cd4.elb.us-east-1.amazonaws.com:6443 --upload-certs
+      command: kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs
       register: kubeadm_init_output
-
+    
     - debug:
         var: kubeadm_init_output
 
@@ -192,6 +325,33 @@
         content: "{{ kubeadm_init_output.stdout }}"
         dest: /root/kubeadm-init-output.txt
 
+    - name: Extract first matching control-plane join command
+      set_fact:
+        control_plane_join_command: "{{ (kubeadm_init_output.stdout_lines | join(' ')) | regex_search('(kubeadm join.*?--certificate-key \\S+)') }}"
+
+    - debug:
+         msg: "{{ control_plane_join_command | regex_replace('\\s+\\\\\\s+', ' ') }}"
+
+    - name: replace escape characters
+      set_fact:
+        replace_command: "{{ control_plane_join_command | regex_replace('\\s+\\\\\\s+', ' ') }}"
+
+    - name: Extract test join command
+      set_fact:
+          control_plane_join_command_2: "{{ (kubeadm_init_output.stdout_lines | join(' ')) | regex_search('(kubeadm join.*?--certificate-key \\S+)') }}"
+  
+    - debug:
+          msg: "{{ control_plane_join_command_2}}"
+
+    - name: Retrieve JOIN_COMMAND from master 2
+      set_fact:
+        JOIN_COMMAND_2: "{{ hostvars[groups['tag_Name_master_node'][0]].replace_command }}"
+
+    - debug:
+        msg: "{{ JOIN_COMMAND_2 }}"
+
+    - debug:
+        msg: "{{ replace_command }}"
     - name: check kubelet status
       command: service kubelet status
       register: service_kubelet
@@ -199,22 +359,8 @@
     - debug:
         var: service_kubelet
 
-    - name: check kubelet system status
-      command: systemctl status kubelet
-      register: system_kubelet
-
-    - debug:
-        var: system_kubelet
-
-    - name: check kubelet logs
-      command: journalctl -u kubelet
-      register: extend_logs_kubelet
-
-    - debug:
-        var: extend_logs_kubelet
-
 - name: create kubeadm user
-  hosts: tag_Name_master_node_main
+  hosts: tag_Name_master_node
   tasks:
     - name: create .kube directory
       file:
@@ -232,7 +378,7 @@
         remote_src: yes
 
 - name: create cilium cni
-  hosts: tag_Name_master_node_main
+  hosts: tag_Name_master_node
   become: yes
   tasks:
     - name: Fetch Cilium CLI version
@@ -299,7 +445,7 @@
       ignore_errors: yes
 
 - name: install cilium
-  hosts: tag_Name_master_node_main
+  hosts: tag_Name_master_node
   tasks:
     - name: install cilium
       command: cilium install
@@ -334,10 +480,38 @@
       set_fact:
         TOKEN: "{{ token_out.stdout }}"
 
-  #  - name: Make TOKEN available to all hosts
-  #   add_host:
-  #    groups: "tag_Cluster_k8_kubeadm"
-  #     TOKEN: "{{ TOKEN }}"
+- name: add/join additional master nodes to the cluster
+  hosts: tag_Name_master_node_2
+  become: yes
+  tasks:
+    - name: Retrieve JOIN_COMMAND from master
+      set_fact:
+        JOIN_COMMAND_MASTER: "{{ hostvars[groups['tag_Name_master_node'][0]].replace_command }}"
+
+    - name: Debug TOKEN MASTER
+      debug:
+        msg: "{{ JOIN_COMMAND_MASTER }}"
+
+    - name: join worker nodes with master
+      command: "{{ JOIN_COMMAND_MASTER }}"
+
+- name: create kubeadm user
+  hosts: tag_Name_master_node_2
+  tasks:
+    - name: create .kube directory
+      file:
+        path: "/home/ubuntu/.kube"
+        state: directory
+        mode: "0755"
+
+    - name: copy admin config file to .kube folder
+      become: yes
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "/home/ubuntu/.kube/config"
+        owner: "{{ lookup('pipe','id -u') }}"
+        group: "{{ lookup('pipe','id -g') }}"
+        remote_src: yes
 
 - name: add/join worker nodes to the cluster
   hosts: tag_Node_worker
@@ -345,14 +519,133 @@
   tasks:
     - name: Retrieve JOIN_COMMAND from master
       set_fact:
-        JOIN_COMMAND: "{{ hostvars[groups['tag_Name_master_node'][0]].TOKEN }}"
+        JOIN_COMMAND: "{{ hostvars[groups['tag_Name_master_node'][0]].TOKEN}}"
 
-    - name: join worker nodes with master
-      command: "{{ JOIN_COMMAND }}"
+    - name: Retrieve hostname of worker node
+      command: hostname
+      register: host
 
-    # - name: cilium status connectivity
-    #   command: cilium connectivity test
-    #   register: cilium_connect
+    - name: Debug hostname
+      debug:
+        msg: "{{ host.stdout }}"
 
-    # - debug:
-    #     var: cilium_connect
+    - name: Extract values from JOIN_COMMAND
+      set_fact:
+        API_SERVER_ENDPOINT: "{{ JOIN_COMMAND.split(' ')[2] | regex_replace(':6443', '') }}"
+        JOIN_TOKEN: "{{ JOIN_COMMAND.split('--token ')[1].split(' ')[0] }}"
+        CA_CERT_HASH: "{{ JOIN_COMMAND.split('--discovery-token-ca-cert-hash ')[1].split(' ')[0] }}"
+        NODE: "{{ host.stdout }}"
+
+    - name: Create join configuration file for the worker node
+      template:
+        src: templates/join-config.yaml.j2
+        dest: "/tmp/join-config-{{ NODE }}.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Join worker node with master
+      command: kubeadm join --config /tmp/join-config-{{ NODE }}.yaml
+      register: join_result
+      ignore_errors: yes
+
+    - name: Debug join output
+      debug:
+        var: join_result
+
+- name: install helm on worker nodes
+  hosts: tag_Cluster_k8-kubeadm
+  become: yes
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - apt-transport-https
+        state: present
+
+    - name: Add Helm GPG key
+      ansible.builtin.shell:
+        cmd: curl -fsSL https://baltocdn.com/helm/signing.asc | gpg --dearmor -o /usr/share/keyrings/helm.gpg
+      args:
+        creates: /usr/share/keyrings/helm.gpg
+
+    - name: Add Helm repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/helm-stable-debian.list
+        content: "deb [arch={{ ansible_architecture }} signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main"
+    
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Helm
+      ansible.builtin.apt:
+        name: helm
+        state: present
+
+- name: install longhorn
+  hosts: tag_Name_master_node
+  tasks:
+    - name: Add Longhorn Helm repository
+      ansible.builtin.command:
+        cmd: helm repo add longhorn https://charts.longhorn.io
+      changed_when: false
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        cmd: helm repo update
+      changed_when: false
+
+    - name: Install Longhorn
+      ansible.builtin.command:
+        cmd: helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace --version 1.7.2
+      args:
+        creates: /etc/kubernetes/manifests/longhorn-installed
+      register: longhorn_install
+
+    - name: Get Longhorn pods
+      ansible.builtin.command:
+        cmd: kubectl -n longhorn-system get pod
+      register: longhorn_pods
+      changed_when: false
+
+    - name: Display Longhorn pods
+      ansible.builtin.debug:
+        var: longhorn_pods.stdout
+
+
+- name: Configure the Cloud Controller Manager
+  hosts: tag_Name_master_node
+  tasks:
+    - name: Clone cloud-provider-aws repository
+      ansible.builtin.git:
+        repo: https://github.com/kubernetes/cloud-provider-aws.git
+        dest: /opt/cloud-provider-aws
+        clone: yes
+        update: yes
+
+    - name: Apply Kubernetes manifests for cloud-provider-aws
+      ansible.builtin.command:
+        cmd: kubectl create -k /opt/cloud-provider-aws/examples/existing-cluster/base
+      changed_when: false
+
+    - name: Get daemonset in kube-system namespace
+      ansible.builtin.command:
+        cmd: kubectl get daemonset -n kube-system
+      register: daemonset_output
+      changed_when: false
+
+    - name: Display daemonset details
+      ansible.builtin.debug:
+        var: daemonset_output.stdout
+
+    - name: Get pods in kube-system namespace
+      ansible.builtin.command:
+        cmd: kubectl get pods -n kube-system
+      register: kube_system_pods
+      changed_when: false
+
+    - name: Display kube-system pods
+      ansible.builtin.debug:
+        var: kube_system_pods.stdout

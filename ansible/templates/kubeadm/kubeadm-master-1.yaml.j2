@@ -1,0 +1,29 @@
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+controlPlaneEndpoint: "{{ API_SERVER_ENDPOINT }}:6443"
+clusterName: kubernetes
+apiServer:
+  certSANs:
+    - 127.0.0.1
+    - {{ PUBLIC_IP }}
+  extraArgs:
+    bind-address: "0.0.0.0"
+    cloud-provider: external
+scheduler:
+  extraArgs:
+    bind-address: "0.0.0.0"
+controllerManager:
+  extraArgs:
+    bind-address: "0.0.0.0"
+    cloud-provider: external
+networking:
+  podSubnet: "10.0.20.0/20"  # Increased from /28 to /20
+  serviceSubnet: "10.0.20.0/24"
+
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+nodeRegistration:
+  name: {{ NODE }}
+  kubeletExtraArgs:
+    cloud-provider: external

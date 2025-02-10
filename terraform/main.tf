@@ -8,7 +8,8 @@ resource "aws_vpc" "dev-vpc" {
   enable_dns_support   = true
 
   tags = {
-    Name = "${var.env_prefix}-vpc"
+    Name                               = "${var.env_prefix}-vpc"
+    "kubernetes.io/cluster/kubernetes" = "owned"
   }
 
 }
@@ -38,5 +39,15 @@ module "webserver" {
   availability_zone    = var.availability_zone
   subnet_id            = module.subnet.subnet_id.id
   vpc_cidr_block       = var.vpc_cidr_block
+
+}
+
+module "loadbalancer" {
+  source      = "./modules/loadbalancer"
+  env_prefix  = var.env_prefix
+  vpc_id      = aws_vpc.dev-vpc.id
+  subnet_id   = module.subnet.subnet_id.id
+  master_1_id = module.webserver.instance_master.id
+  master_2_id = module.webserver.instance_master_2.id
 
 }

@@ -7,3 +7,6 @@ output "instance_worker_1" {
 output "instance_worker_2" {
   value = aws_instance.k8-worker_2
 }
+output "instance_master_2" {
+  value = aws_instance.k8-master_2
+}
