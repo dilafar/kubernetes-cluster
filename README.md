@@ -1,4 +1,6 @@
 # Highly Available kubeadm Cluster
 
-![kubeadm-latest-image](https://github.com/user-attachments/assets/8016d664-e0f1-4250-8389-4d72543347c0)
+![kubeadm-new-1](https://github.com/user-attachments/assets/4c4d8006-10fe-483f-9f35-aba44c3dbd93)
+
+
 
