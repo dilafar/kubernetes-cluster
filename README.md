@@ -48,7 +48,7 @@ For further details on setup and configuration, refer to the relevant documentat
 ## Cluster Architecture 
 ![kubeadm-new-2](https://github.com/user-attachments/assets/0dbdeb8e-ee8c-416a-b8cf-1e9c6b3155f0)
 
-## Kubernetes Cluster Deployment with Terraform and Ansible
+## Kubernetes Cluster SetUp
 
 ## Overview
 This project automates the deployment of a Kubernetes cluster on AWS using Terraform and Ansible. It sets up:
@@ -67,8 +67,8 @@ Ensure you have the following installed on your local machine:
 
 ### 1. Clone the Repository
 ```bash
-git clone <repository-url>
-cd <repository-folder>
+git clone https://github.com/dilafar/kubernetes-cluster.git
+cd kubernetes-cluster
 ```
 
 ### 2. Deploy Infrastructure with Terraform
