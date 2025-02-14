@@ -1,7 +1,7 @@
 # High Availability Kubernetes Cluster with Kubeadm
 
 ## Overview
-This document describes the architecture and setup of a highly available Kubernetes cluster deployed using **Terraform**, **Ansible**, and **Kubeadm**. The cluster is configured with multiple control plane nodes, an AWS Network Load Balancer for API server redundancy, **Containerd** as the container runtime, **Cilium** as the CNI for high-performance networking, and **CoreDNS** for service discovery. Additionally, the AWS Cloud Controller Manager is installed to enable cloud-native resource management, and **Longhorn** is used as a storage backend for persistent volumes.
+Set up a highly available Kubernetes cluster deployed using **Terraform**, **Ansible**, and **Kubeadm**. The cluster is configured with multiple control plane nodes, an AWS Network Load Balancer for API server redundancy, **Containerd** as the container runtime, **Cilium** as the CNI for high-performance networking, and **CoreDNS** for service discovery. Additionally, the AWS Cloud Controller Manager is installed to enable cloud-native resource management, and **Longhorn** is used as a storage backend for persistent volumes.
 
 ## Cluster Deployment Architecture
 
@@ -38,12 +38,6 @@ This document describes the architecture and setup of a highly available Kuberne
 
 ### 8. **Persistent Storage**
 - **Longhorn** is deployed as a distributed block storage solution for managing persistent volumes.
-
-## Summary
-This Kubernetes cluster is designed for high availability, scalability, and cloud-native performance. By leveraging **Kubeadm**, **AWS infrastructure**, **Cilium networking**, and **Longhorn storage**, the cluster ensures seamless operation and efficient resource management. The AWS Network Load Balancer plays a critical role in distributing API traffic across control plane nodes, ensuring resilience and failover capabilities.
-
----
-For further details on setup and configuration, refer to the relevant documentation for **Kubeadm**, **Terraform**, **Ansible**, **Cilium**, and **Longhorn**.
 
 ## Cluster Architecture 
 ![kubeadm-new-2](https://github.com/user-attachments/assets/0dbdeb8e-ee8c-416a-b8cf-1e9c6b3155f0)
